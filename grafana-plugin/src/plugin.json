@@ -1,0 +1,64 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "app",
+  "name": "OnCall",
+  "id": "devops-oncall-app",
+  "preload": true,
+  "info": {
+    "description": "On-call scheduling, Alertmanager intake, Jira Cloud task creation and duty reports.",
+    "author": {
+      "name": "Local"
+    },
+    "keywords": ["oncall", "alertmanager", "jira", "devops"],
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [],
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "includes": [
+    {
+      "type": "page",
+      "name": "Calendar",
+      "path": "/a/%PLUGIN_ID%/calendar",
+      "role": "Viewer",
+      "addToNav": true,
+      "defaultNav": true
+    },
+    {
+      "type": "page",
+      "name": "People",
+      "path": "/a/%PLUGIN_ID%/people",
+      "role": "Viewer",
+      "addToNav": true
+    },
+    {
+      "type": "page",
+      "name": "Alerts",
+      "path": "/a/%PLUGIN_ID%/alerts",
+      "role": "Viewer",
+      "addToNav": true
+    },
+    {
+      "type": "page",
+      "name": "Reports",
+      "path": "/a/%PLUGIN_ID%/reports",
+      "role": "Viewer",
+      "addToNav": true
+    },
+    {
+      "type": "page",
+      "name": "Settings",
+      "path": "/a/%PLUGIN_ID%/settings",
+      "role": "Admin",
+      "addToNav": true
+    }
+  ],
+  "dependencies": {
+    "grafanaDependency": ">=12.0.0",
+    "plugins": []
+  }
+}

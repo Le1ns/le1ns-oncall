@@ -1,0 +1,23 @@
+.DS_Store
+.idea/
+
+# Local env
+.env
+.env.*
+!.env.example
+
+# Go
+backend/.cache/
+backend/bin/
+backend/coverage.out
+
+# Node / Grafana plugin
+grafana-plugin/node_modules/
+grafana-plugin/dist/
+grafana-plugin/.yarn/
+grafana-plugin/.pnp.*
+grafana-plugin/coverage/
+
+# Runtime data
+data/
+tmp/

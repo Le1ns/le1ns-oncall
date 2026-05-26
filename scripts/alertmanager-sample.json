@@ -1,0 +1,20 @@
+{
+  "receiver": "oncall",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "severity": "critical",
+        "service": "checkout"
+      },
+      "annotations": {
+        "summary": "High error rate on checkout"
+      },
+      "startsAt": "2026-05-26T17:00:00Z",
+      "fingerprint": "sample-high-error-rate"
+    }
+  ],
+  "groupKey": "{}:{alertname=\"HighErrorRate\"}"
+}
