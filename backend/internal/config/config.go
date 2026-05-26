@@ -5,6 +5,7 @@ import "os"
 type Config struct {
 	HTTPAddr            string
 	PublicBaseURL       string
+	DatabaseURL         string
 	GrafanaURL          string
 	GrafanaServiceToken string
 	GrafanaBasicAuth    string
@@ -22,6 +23,7 @@ func Load() Config {
 	return Config{
 		HTTPAddr:            env("ONCALL_HTTP_ADDR", ":8080"),
 		PublicBaseURL:       env("ONCALL_PUBLIC_BASE_URL", "http://localhost:8080"),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
 		GrafanaURL:          env("ONCALL_GRAFANA_URL", "http://localhost:3000"),
 		GrafanaServiceToken: os.Getenv("ONCALL_GRAFANA_SERVICE_TOKEN"),
 		GrafanaBasicAuth:    os.Getenv("ONCALL_GRAFANA_BASIC_AUTH"),

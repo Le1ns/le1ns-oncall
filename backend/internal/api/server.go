@@ -101,7 +101,7 @@ func (s *Server) calendar(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"range": map[string]string{
 			"from": from.Format(time.DateOnly),
-			"to":   to.Format(time.DateOnly),
+			"to":   to.Add(-time.Nanosecond).Format(time.DateOnly),
 		},
 		"shifts": s.store.Shifts(from, to),
 	})
@@ -125,7 +125,7 @@ func (s *Server) createShift(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) alerts(w http.ResponseWriter, _ *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{
-		"alerts": []map[string]any{},
+		"alerts": s.store.Alerts(100),
 	})
 }
 
@@ -161,12 +161,13 @@ func (s *Server) alertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	alertCount := 0
-	if alerts, ok := payload["alerts"].([]any); ok {
-		alertCount = len(alerts)
+	alertCount, err := s.store.SaveAlertmanagerPayload(payload)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 
-	s.log.Info("received alertmanager webhook", "alerts", alertCount)
+	s.log.Info("received alertmanager webhook", "saved_alerts", alertCount)
 	httpx.JSON(w, http.StatusAccepted, map[string]any{
 		"status": "accepted",
 		"alerts": alertCount,

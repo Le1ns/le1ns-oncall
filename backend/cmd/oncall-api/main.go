@@ -20,9 +20,16 @@ func main() {
 	}))
 
 	cfg := config.Load()
+	st, err := store.New(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		log.Error("store initialization failed", "error", err)
+		os.Exit(1)
+	}
+	defer st.Close()
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           api.NewServer(cfg, log, store.New()).Handler(),
+		Handler:           api.NewServer(cfg, log, st).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

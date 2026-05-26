@@ -316,6 +316,12 @@
   font-weight: 600;
 }
 
+.oncall-muted {
+  color: rgb(159, 167, 179);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
 @media (max-width: 1100px) {
   .oncall-toolbar,
   .oncall-table-title {

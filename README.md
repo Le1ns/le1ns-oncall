@@ -8,6 +8,7 @@ Self-hosted on-call platform built as a Grafana App Plugin plus a separate backe
 - Go backend API for schedules, alerts, Jira, notifications, and reports.
 - PostgreSQL storage.
 - Alertmanager webhook endpoint.
+- Alertmanager alert storage and assignment to the active duty shift.
 - Jira Cloud integration placeholder.
 - Telegram and Lark notification placeholders.
 - Docker Compose for local development, Helm directory reserved for Kubernetes packaging.
@@ -71,6 +72,12 @@ Local endpoint:
 ```text
 POST http://localhost:8080/api/v1/integrations/alertmanager/webhook
 Authorization: Bearer dev-alertmanager-token
+```
+
+Stored alerts are available in the Grafana plugin `Alerts` page and through:
+
+```text
+GET http://localhost:8080/api/v1/alerts
 ```
 
 ## Architecture

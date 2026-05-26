@@ -20,9 +20,10 @@ export function CalendarPage() {
 
   const [form, setForm] = useState({
     userId: '',
-    date: toDateInput(new Date()),
-    startsAt: '09:00',
-    endsAt: '09:00',
+    startDate: toDateInput(new Date()),
+    startTime: '09:00',
+    endDate: toDateInput(addDays(new Date(), 1)),
+    endTime: '09:00',
     layer: '0',
   });
 
@@ -60,10 +61,11 @@ export function CalendarPage() {
       return;
     }
 
-    const startsAt = localDateTime(form.date, form.startsAt);
-    let endsAt = localDateTime(form.date, form.endsAt);
+    const startsAt = localDateTime(form.startDate, form.startTime);
+    const endsAt = localDateTime(form.endDate, form.endTime);
     if (endsAt <= startsAt) {
-      endsAt = new Date(endsAt.getTime() + DAY_MS);
+      setError('End date and time must be after start date and time');
+      return;
     }
 
     const input: CreateShiftInput = {
@@ -189,22 +191,39 @@ export function CalendarPage() {
         </label>
 
         <label>
-          Date
-          <input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} />
-        </label>
-
-        <label>
-          Start
+          Start date
           <input
-            type="time"
-            value={form.startsAt}
-            onChange={(event) => setForm({ ...form, startsAt: event.target.value })}
+            type="date"
+            value={form.startDate}
+            onChange={(event) => setForm({ ...form, startDate: event.target.value })}
           />
         </label>
 
         <label>
-          End
-          <input type="time" value={form.endsAt} onChange={(event) => setForm({ ...form, endsAt: event.target.value })} />
+          Start time
+          <input
+            type="time"
+            value={form.startTime}
+            onChange={(event) => setForm({ ...form, startTime: event.target.value })}
+          />
+        </label>
+
+        <label>
+          End date
+          <input
+            type="date"
+            value={form.endDate}
+            onChange={(event) => setForm({ ...form, endDate: event.target.value })}
+          />
+        </label>
+
+        <label>
+          End time
+          <input
+            type="time"
+            value={form.endTime}
+            onChange={(event) => setForm({ ...form, endTime: event.target.value })}
+          />
         </label>
 
         <label>

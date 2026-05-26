@@ -70,6 +70,24 @@ export interface PeriodReport {
   };
 }
 
+export interface AlertmanagerAlert {
+  id: string;
+  fingerprint: string;
+  groupKey: string;
+  status: string;
+  severity: string;
+  alertName: string;
+  service: string;
+  summary: string;
+  startsAt?: string;
+  endsAt?: string;
+  assignedUserId: number;
+  assignedUserLogin: string;
+  assignedUserName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PersonReport {
   userId: number;
   userLogin: string;
@@ -109,7 +127,7 @@ export const onCallApi = {
       body: JSON.stringify(input),
     }),
   users: () => request<{ users: GrafanaUser[]; source: string; note?: string }>('/api/v1/grafana/users'),
-  alerts: () => request<{ alerts: unknown[] }>('/api/v1/alerts'),
+  alerts: () => request<{ alerts: AlertmanagerAlert[] }>('/api/v1/alerts'),
   dailyReport: () => request<DailyReport>('/api/v1/reports/daily'),
   periodReport: (from: string, to: string) => request<PeriodReport>(withPeriod('/api/v1/reports/period', from, to)),
 };
