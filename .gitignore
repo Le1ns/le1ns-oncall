@@ -8,6 +8,7 @@
 
 # Go
 backend/.cache/
+backend/.gocache/
 backend/bin/
 backend/coverage.out
 

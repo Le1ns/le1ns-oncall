@@ -71,8 +71,13 @@ CREATE TABLE IF NOT EXISTS jira_issues (
 CREATE TABLE IF NOT EXISTS notification_channels (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   kind TEXT NOT NULL,
+  target_type TEXT NOT NULL DEFAULT 'group',
   name TEXT NOT NULL,
   target TEXT NOT NULL,
+  grafana_user_id BIGINT,
+  user_login TEXT NOT NULL DEFAULT '',
+  user_name TEXT NOT NULL DEFAULT '',
+  severities TEXT NOT NULL DEFAULT 'critical',
   enabled BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

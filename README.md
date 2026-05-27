@@ -80,6 +80,39 @@ Stored alerts are available in the Grafana plugin `Alerts` page and through:
 GET http://localhost:8080/api/v1/alerts
 ```
 
+Alert intake is intentionally conservative by default:
+
+```text
+ONCALL_ALERTMANAGER_ALLOWED_SEVERITIES=critical,fatal
+ONCALL_ALERTMANAGER_MAX_ALERTS_PER_GROUP=20
+ONCALL_ALERTMANAGER_RATE_WINDOW=10m
+ONCALL_ALERTMANAGER_MAX_ALERTS_PER_WEBHOOK=100
+```
+
+All Alertmanager severities are accepted by default, and notification routing decides which severities are sent to each person or group. The per-group window and per-webhook cap protect Jira/task creation from incident cascades where one root cause fans out into many secondary alerts. Set `ONCALL_ALERTMANAGER_ALLOWED_SEVERITIES=critical,fatal` if the intake itself should drop lower-severity alerts before storage.
+
+## Notifications
+
+Notification routing is configured from the Grafana plugin `Settings` page. Click `Add notification`, choose a provider and target type, then select severities and a chat target.
+
+Supported target types:
+
+- `Person`: select a Grafana user, set chat ID, and choose severities. Alerts are sent only when that user is the active on-call assignee.
+- `Group`: set a group name, chat ID, and severities. Matching alerts are sent regardless of the assigned person.
+
+Telegram still needs a bot token in backend configuration:
+
+```text
+ONCALL_TELEGRAM_BOT_TOKEN=...
+```
+
+For direct messages Telegram requires the user to open the bot and send `/start`; bots cannot resolve or message a private user by username alone. Use the numeric chat ID in the plugin form. `ONCALL_TELEGRAM_CHAT_ID` and `ONCALL_TELEGRAM_CHAT_MAPPING` are still supported as a local fallback for critical alerts when no database routing rule matches.
+
+Current Telegram events:
+
+- new firing critical/fatal Alertmanager alert;
+- manually created on-call shift.
+
 ## Architecture
 
 Grafana owns the UI. The backend owns all durable behavior: schedules, alert intake, deduplication, Jira issue creation, notifications, and reports. This keeps the system less sensitive to Grafana upgrades.

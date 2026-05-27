@@ -12,6 +12,7 @@ import (
 
 	"github.com/local/oncall-plugin/backend/internal/config"
 	"github.com/local/oncall-plugin/backend/internal/httpx"
+	"github.com/local/oncall-plugin/backend/internal/notify"
 	"github.com/local/oncall-plugin/backend/internal/store"
 )
 
@@ -19,6 +20,7 @@ type Server struct {
 	config config.Config
 	log    *slog.Logger
 	store  *store.Store
+	tg     *notify.Telegram
 	mux    *http.ServeMux
 }
 
@@ -27,7 +29,12 @@ func NewServer(cfg config.Config, log *slog.Logger, st *store.Store) *Server {
 		config: cfg,
 		log:    log,
 		store:  st,
-		mux:    http.NewServeMux(),
+		tg: notify.NewTelegram(notify.TelegramConfig{
+			BotToken:    cfg.TelegramBotToken,
+			ChatID:      cfg.TelegramChatID,
+			ChatMapping: cfg.TelegramChatMapping,
+		}),
+		mux: http.NewServeMux(),
 	}
 	s.routes()
 	return s
@@ -46,6 +53,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/shifts", s.calendar)
 	s.mux.HandleFunc("POST /api/v1/shifts", s.createShift)
 	s.mux.HandleFunc("GET /api/v1/alerts", s.alerts)
+	s.mux.HandleFunc("GET /api/v1/notification-channels", s.notificationChannels)
+	s.mux.HandleFunc("POST /api/v1/notification-channels", s.createNotificationChannel)
+	s.mux.HandleFunc("PUT /api/v1/notification-channels/{id}", s.updateNotificationChannel)
+	s.mux.HandleFunc("DELETE /api/v1/notification-channels/{id}", s.deleteNotificationChannel)
 	s.mux.HandleFunc("GET /api/v1/reports/daily", s.dailyReport)
 	s.mux.HandleFunc("GET /api/v1/reports/period", s.periodReport)
 	s.mux.HandleFunc("POST /api/v1/integrations/alertmanager/webhook", s.alertmanagerWebhook)
@@ -64,7 +75,7 @@ func (s *Server) meta(w http.ResponseWriter, _ *http.Request) {
 		"features": map[string]bool{
 			"grafanaUsers": s.config.GrafanaServiceToken != "" || s.config.GrafanaBasicAuth != "",
 			"jiraCloud":    s.config.JiraBaseURL != "" && s.config.JiraEmail != "" && s.config.JiraAPIToken != "",
-			"telegram":     s.config.TelegramBotToken != "",
+			"telegram":     s.tg.Enabled(),
 			"lark":         s.config.LarkWebhookURL != "",
 		},
 	})
@@ -119,6 +130,7 @@ func (s *Server) createShift(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.notifyShiftCreated(r.Context(), shift)
 
 	httpx.JSON(w, http.StatusCreated, shift)
 }
@@ -127,6 +139,50 @@ func (s *Server) alerts(w http.ResponseWriter, _ *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"alerts": s.store.Alerts(100),
 	})
+}
+
+func (s *Server) notificationChannels(w http.ResponseWriter, _ *http.Request) {
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"channels": s.store.NotificationChannels(),
+	})
+}
+
+func (s *Server) createNotificationChannel(w http.ResponseWriter, r *http.Request) {
+	var input store.CreateNotificationChannel
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+
+	channel, err := s.store.CreateNotificationChannel(input)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, channel)
+}
+
+func (s *Server) updateNotificationChannel(w http.ResponseWriter, r *http.Request) {
+	var input store.CreateNotificationChannel
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+
+	channel, err := s.store.UpdateNotificationChannel(r.PathValue("id"), input)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, channel)
+}
+
+func (s *Server) deleteNotificationChannel(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteNotificationChannel(r.PathValue("id")); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) dailyReport(w http.ResponseWriter, _ *http.Request) {
@@ -161,17 +217,82 @@ func (s *Server) alertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	alertCount, err := s.store.SaveAlertmanagerPayload(payload)
+	result, err := s.store.SaveAlertmanagerPayload(payload, store.AlertIntakeConfig{
+		AllowedSeverities: s.config.AlertSeverities,
+		MaxPerGroup:       s.config.AlertMaxPerGroup,
+		RateWindow:        s.config.AlertRateWindow,
+		MaxPerWebhook:     s.config.AlertMaxPerWebhook,
+	})
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	s.log.Info("received alertmanager webhook", "saved_alerts", alertCount)
+	s.log.Info(
+		"received alertmanager webhook",
+		"received_alerts", result.Received,
+		"saved_alerts", result.Saved,
+		"filtered_alerts", result.Filtered,
+		"rate_limited_alerts", result.RateLimited,
+	)
+	s.notifyCriticalAlerts(r.Context(), result.SavedAlerts)
 	httpx.JSON(w, http.StatusAccepted, map[string]any{
-		"status": "accepted",
-		"alerts": alertCount,
+		"status":      "accepted",
+		"alerts":      result.Saved,
+		"received":    result.Received,
+		"filtered":    result.Filtered,
+		"rateLimited": result.RateLimited,
 	})
+}
+
+func (s *Server) notifyCriticalAlerts(ctx context.Context, alerts []store.Alert) {
+	if !s.tg.Enabled() {
+		return
+	}
+	for _, alert := range alerts {
+		if alert.Status != "firing" {
+			continue
+		}
+		channels := s.store.AlertNotificationChannels(alert)
+		if len(channels) == 0 && isCriticalSeverity(alert.Severity) {
+			channels = append(channels, store.NotificationChannel{ChatID: s.tg.ChatIDFor(alert.AssignedUserLogin)})
+		}
+		assignee := firstNonEmpty(alert.AssignedUserName, alert.AssignedUserLogin)
+		for _, channel := range channels {
+			err := s.tg.Send(ctx, notify.Message{
+				ChatID: channel.ChatID,
+				Text: notify.AlertMessage(
+					alert.Status,
+					alert.Severity,
+					alert.AlertName,
+					alert.Service,
+					alert.Summary,
+					assignee,
+				),
+			})
+			if err != nil {
+				s.log.Warn("telegram alert notification failed", "error", err, "channel", channel.Name)
+			}
+		}
+	}
+}
+
+func (s *Server) notifyShiftCreated(ctx context.Context, shift store.Shift) {
+	if !s.tg.Enabled() {
+		return
+	}
+	err := s.tg.Send(ctx, notify.Message{
+		ChatID: s.tg.ChatIDFor(shift.UserLogin),
+		Text: notify.ShiftMessage(
+			shift.UserName,
+			shift.UserLogin,
+			shift.StartsAt.Format(time.RFC3339),
+			shift.EndsAt.Format(time.RFC3339),
+		),
+	})
+	if err != nil {
+		s.log.Warn("telegram shift notification failed", "error", err)
+	}
 }
 
 func cors(next http.Handler) http.Handler {
@@ -244,6 +365,24 @@ func (s *Server) fetchGrafanaUsers(ctx context.Context) ([]store.GrafanaUser, er
 		})
 	}
 	return users, nil
+}
+
+func isCriticalSeverity(severity string) bool {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "critical", "fatal":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func periodFromQuery(r *http.Request) (time.Time, time.Time) {

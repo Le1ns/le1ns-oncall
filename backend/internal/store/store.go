@@ -70,6 +70,33 @@ type CreateShift struct {
 	Layer      int       `json:"layer"`
 }
 
+type NotificationChannel struct {
+	ID            string    `json:"id"`
+	Kind          string    `json:"kind"`
+	TargetType    string    `json:"targetType"`
+	Name          string    `json:"name"`
+	GrafanaUserID int64     `json:"grafanaUserId"`
+	UserLogin     string    `json:"userLogin"`
+	UserName      string    `json:"userName"`
+	ChatID        string    `json:"chatId"`
+	Severities    []string  `json:"severities"`
+	Enabled       bool      `json:"enabled"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+type CreateNotificationChannel struct {
+	Kind          string   `json:"kind"`
+	TargetType    string   `json:"targetType"`
+	Name          string   `json:"name"`
+	GrafanaUserID int64    `json:"grafanaUserId"`
+	UserLogin     string   `json:"userLogin"`
+	UserName      string   `json:"userName"`
+	ChatID        string   `json:"chatId"`
+	Severities    []string `json:"severities"`
+	Enabled       bool     `json:"enabled"`
+}
+
 type PeriodReport struct {
 	From      string         `json:"from"`
 	To        string         `json:"to"`
@@ -95,12 +122,35 @@ type ReportTotals struct {
 	JiraIssuesCreated int     `json:"jiraIssuesCreated"`
 }
 
+type AlertIntakeConfig struct {
+	AllowedSeverities []string
+	MaxPerGroup       int
+	RateWindow        time.Duration
+	MaxPerWebhook     int
+}
+
+type AlertIntakeResult struct {
+	Received    int     `json:"received"`
+	Saved       int     `json:"saved"`
+	Filtered    int     `json:"filtered"`
+	RateLimited int     `json:"rateLimited"`
+	SavedAlerts []Alert `json:"-"`
+}
+
+type alertIntakeWindow struct {
+	startedAt time.Time
+	count     int
+}
+
 type Store struct {
-	db        *pgxpool.Pool
-	mu        sync.Mutex
-	schedules []Schedule
-	shifts    []Shift
-	alerts    []Alert
+	db            *pgxpool.Pool
+	mu            sync.Mutex
+	intakeMu      sync.Mutex
+	schedules     []Schedule
+	shifts        []Shift
+	alerts        []Alert
+	notifications []NotificationChannel
+	intakeWindows map[string]alertIntakeWindow
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
@@ -147,7 +197,8 @@ func newMemoryStore() *Store {
 	}
 
 	return &Store{
-		schedules: []Schedule{schedule},
+		intakeWindows: map[string]alertIntakeWindow{},
+		schedules:     []Schedule{schedule},
 		shifts: []Shift{
 			{
 				ID:           "shift-current",
@@ -163,6 +214,103 @@ func newMemoryStore() *Store {
 			},
 		},
 	}
+}
+
+func (s *Store) NotificationChannels() []NotificationChannel {
+	if s.db != nil {
+		return s.pgNotificationChannels()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := make([]NotificationChannel, len(s.notifications))
+	copy(result, s.notifications)
+	sortNotificationChannels(result)
+	return result
+}
+
+func (s *Store) CreateNotificationChannel(input CreateNotificationChannel) (NotificationChannel, error) {
+	channel, err := normalizeNotificationChannel(input)
+	if err != nil {
+		return NotificationChannel{}, err
+	}
+	if s.db != nil {
+		return s.pgCreateNotificationChannel(channel)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.notifications = append(s.notifications, channel)
+	return channel, nil
+}
+
+func (s *Store) UpdateNotificationChannel(id string, input CreateNotificationChannel) (NotificationChannel, error) {
+	channel, err := normalizeNotificationChannel(input)
+	if err != nil {
+		return NotificationChannel{}, err
+	}
+	channel.ID = strings.TrimSpace(id)
+	if channel.ID == "" {
+		return NotificationChannel{}, fmt.Errorf("notification channel id is required")
+	}
+
+	if s.db != nil {
+		return s.pgUpdateNotificationChannel(channel)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.notifications {
+		if s.notifications[index].ID == channel.ID {
+			channel.CreatedAt = s.notifications[index].CreatedAt
+			s.notifications[index] = channel
+			return channel, nil
+		}
+	}
+	return NotificationChannel{}, fmt.Errorf("notification channel not found")
+}
+
+func (s *Store) DeleteNotificationChannel(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("notification channel id is required")
+	}
+	if s.db != nil {
+		return s.pgDeleteNotificationChannel(id)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.notifications {
+		if s.notifications[index].ID == id {
+			s.notifications = append(s.notifications[:index], s.notifications[index+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("notification channel not found")
+}
+
+func (s *Store) AlertNotificationChannels(alert Alert) []NotificationChannel {
+	channels := s.NotificationChannels()
+	result := make([]NotificationChannel, 0, len(channels))
+	for _, channel := range channels {
+		if !channel.Enabled || channel.Kind != "telegram" || channel.ChatID == "" {
+			continue
+		}
+		if !severityAllowed(alert.Severity, severitySet(channel.Severities)) {
+			continue
+		}
+		if channel.TargetType == "group" {
+			result = append(result, channel)
+			continue
+		}
+		if channel.TargetType == "person" && channelMatchesAlertUser(channel, alert) {
+			result = append(result, channel)
+		}
+	}
+	return dedupeNotificationChannels(result)
 }
 
 func (s *Store) Schedules() []Schedule {
@@ -246,20 +394,34 @@ func (s *Store) Alerts(limit int) []Alert {
 	return result
 }
 
-func (s *Store) SaveAlertmanagerPayload(payload map[string]any) (int, error) {
+func (s *Store) SaveAlertmanagerPayload(payload map[string]any, config AlertIntakeConfig) (AlertIntakeResult, error) {
 	alertItems, ok := payload["alerts"].([]any)
 	if !ok {
-		return 0, nil
+		return AlertIntakeResult{}, nil
 	}
 
+	result := AlertIntakeResult{Received: len(alertItems)}
 	groupKey, _ := payload["groupKey"].(string)
-	saved := 0
-	for _, item := range alertItems {
+	severities := severitySet(config.AllowedSeverities)
+	now := time.Now()
+	for index, item := range alertItems {
+		if config.MaxPerWebhook > 0 && index >= config.MaxPerWebhook {
+			result.RateLimited += len(alertItems) - index
+			break
+		}
 		alertMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
 		alert := parseAlert(alertMap, groupKey)
+		if !severityAllowed(alert.Severity, severities) {
+			result.Filtered++
+			continue
+		}
+		if !s.allowAlertIntake(intakeKey(alert), now, config) {
+			result.RateLimited++
+			continue
+		}
 		if alert.Fingerprint == "" {
 			alert.Fingerprint = fmt.Sprintf("alert-%d", time.Now().UnixNano())
 		}
@@ -272,15 +434,17 @@ func (s *Store) SaveAlertmanagerPayload(payload map[string]any) (int, error) {
 		}
 
 		if s.db != nil {
+			s.pgAssignAlertToShift(&alert)
 			if err := s.pgUpsertAlert(alert); err != nil {
-				return saved, err
+				return result, err
 			}
 		} else {
 			s.memoryUpsertAlert(alert)
 		}
-		saved++
+		result.Saved++
+		result.SavedAlerts = append(result.SavedAlerts, alert)
 	}
-	return saved, nil
+	return result, nil
 }
 
 func (s *Store) Report(from, to time.Time) PeriodReport {
@@ -409,6 +573,23 @@ CREATE TABLE IF NOT EXISTS oncall_alerts (
 
 CREATE INDEX IF NOT EXISTS oncall_alerts_created_at_idx ON oncall_alerts(created_at DESC);
 CREATE INDEX IF NOT EXISTS oncall_alerts_status_idx ON oncall_alerts(status);
+
+CREATE TABLE IF NOT EXISTS oncall_notification_channels (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  grafana_user_id BIGINT NOT NULL DEFAULT 0,
+  user_login TEXT NOT NULL DEFAULT '',
+  user_name TEXT NOT NULL DEFAULT '',
+  chat_id TEXT NOT NULL,
+  severities TEXT NOT NULL DEFAULT 'critical',
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS oncall_notification_channels_kind_idx ON oncall_notification_channels(kind, target_type);
 `)
 	return err
 }
@@ -602,11 +783,107 @@ LIMIT $1
 	return alerts
 }
 
+func (s *Store) pgNotificationChannels() []NotificationChannel {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.db.Query(ctx, `
+SELECT id, kind, target_type, name, grafana_user_id, user_login, user_name, chat_id, severities, enabled, created_at, updated_at
+FROM oncall_notification_channels
+ORDER BY created_at DESC
+`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	channels := []NotificationChannel{}
+	for rows.Next() {
+		var channel NotificationChannel
+		var severities string
+		if err := rows.Scan(
+			&channel.ID,
+			&channel.Kind,
+			&channel.TargetType,
+			&channel.Name,
+			&channel.GrafanaUserID,
+			&channel.UserLogin,
+			&channel.UserName,
+			&channel.ChatID,
+			&severities,
+			&channel.Enabled,
+			&channel.CreatedAt,
+			&channel.UpdatedAt,
+		); err != nil {
+			return nil
+		}
+		channel.Severities = splitCSV(severities)
+		channels = append(channels, channel)
+	}
+	return channels
+}
+
+func (s *Store) pgCreateNotificationChannel(channel NotificationChannel) (NotificationChannel, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := s.db.Exec(ctx, `
+INSERT INTO oncall_notification_channels (
+  id, kind, target_type, name, grafana_user_id, user_login, user_name, chat_id, severities, enabled, created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+`, channel.ID, channel.Kind, channel.TargetType, channel.Name, channel.GrafanaUserID, channel.UserLogin, channel.UserName, channel.ChatID, strings.Join(channel.Severities, ","), channel.Enabled, channel.CreatedAt, channel.UpdatedAt)
+	if err != nil {
+		return NotificationChannel{}, err
+	}
+	return channel, nil
+}
+
+func (s *Store) pgUpdateNotificationChannel(channel NotificationChannel) (NotificationChannel, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var createdAt time.Time
+	err := s.db.QueryRow(ctx, `
+UPDATE oncall_notification_channels
+SET kind = $2,
+    target_type = $3,
+    name = $4,
+    grafana_user_id = $5,
+    user_login = $6,
+    user_name = $7,
+    chat_id = $8,
+    severities = $9,
+    enabled = $10,
+    updated_at = $11
+WHERE id = $1
+RETURNING created_at
+`, channel.ID, channel.Kind, channel.TargetType, channel.Name, channel.GrafanaUserID, channel.UserLogin, channel.UserName, channel.ChatID, strings.Join(channel.Severities, ","), channel.Enabled, channel.UpdatedAt).Scan(&createdAt)
+	if err != nil {
+		return NotificationChannel{}, err
+	}
+	channel.CreatedAt = createdAt
+	return channel, nil
+}
+
+func (s *Store) pgDeleteNotificationChannel(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tag, err := s.db.Exec(ctx, `DELETE FROM oncall_notification_channels WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("notification channel not found")
+	}
+	return nil
+}
+
 func (s *Store) pgUpsertAlert(alert Alert) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	assignAlertToShift(ctx, s.db, &alert)
 	_, err := s.db.Exec(ctx, `
 INSERT INTO oncall_alerts (
   id,
@@ -643,6 +920,13 @@ ON CONFLICT (fingerprint) DO UPDATE SET
 	return err
 }
 
+func (s *Store) pgAssignAlertToShift(alert *Alert) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	assignAlertToShift(ctx, s.db, alert)
+}
+
 func (s *Store) memorySchedules() []Schedule {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -666,6 +950,31 @@ func (s *Store) memoryUpsertAlert(alert Alert) {
 	}
 	alert.CreatedAt = now
 	s.alerts = append(s.alerts, alert)
+}
+
+func (s *Store) allowAlertIntake(key string, now time.Time, config AlertIntakeConfig) bool {
+	if config.MaxPerGroup <= 0 || config.RateWindow <= 0 {
+		return true
+	}
+
+	s.intakeMu.Lock()
+	defer s.intakeMu.Unlock()
+
+	if s.intakeWindows == nil {
+		s.intakeWindows = map[string]alertIntakeWindow{}
+	}
+
+	window := s.intakeWindows[key]
+	if window.startedAt.IsZero() || now.Sub(window.startedAt) >= config.RateWindow {
+		s.intakeWindows[key] = alertIntakeWindow{startedAt: now, count: 1}
+		return true
+	}
+	if window.count >= config.MaxPerGroup {
+		return false
+	}
+	window.count++
+	s.intakeWindows[key] = window
+	return true
 }
 
 func buildShift(schedule Schedule, input CreateShift) Shift {
@@ -708,6 +1017,34 @@ func parseAlert(raw map[string]any, groupKey string) Alert {
 		StartsAt:    startsAt,
 		EndsAt:      endsAt,
 	}
+}
+
+func severitySet(values []string) map[string]bool {
+	result := map[string]bool{}
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized != "" {
+			result[normalized] = true
+		}
+	}
+	return result
+}
+
+func severityAllowed(severity string, allowed map[string]bool) bool {
+	if len(allowed) == 0 || allowed["*"] {
+		return true
+	}
+	return allowed[strings.ToLower(strings.TrimSpace(severity))]
+}
+
+func intakeKey(alert Alert) string {
+	if alert.GroupKey != "" {
+		return alert.GroupKey
+	}
+	if alert.Service != "" || alert.AlertName != "" {
+		return alert.Service + ":" + alert.AlertName
+	}
+	return "ungrouped"
 }
 
 func assignAlertToShift(ctx context.Context, db *pgxpool.Pool, alert *Alert) {
@@ -758,6 +1095,109 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizeNotificationChannel(input CreateNotificationChannel) (NotificationChannel, error) {
+	kind := strings.ToLower(strings.TrimSpace(input.Kind))
+	targetType := strings.ToLower(strings.TrimSpace(input.TargetType))
+	if kind == "" {
+		kind = "telegram"
+	}
+	if kind != "telegram" && kind != "lark" {
+		return NotificationChannel{}, fmt.Errorf("notification kind must be telegram or lark")
+	}
+	if targetType != "person" && targetType != "group" {
+		return NotificationChannel{}, fmt.Errorf("targetType must be person or group")
+	}
+
+	chatID := strings.TrimSpace(input.ChatID)
+	if chatID == "" {
+		return NotificationChannel{}, fmt.Errorf("chatId is required")
+	}
+
+	name := strings.TrimSpace(input.Name)
+	userLogin := strings.TrimSpace(input.UserLogin)
+	userName := strings.TrimSpace(input.UserName)
+	if targetType == "person" {
+		if input.GrafanaUserID == 0 || userLogin == "" {
+			return NotificationChannel{}, fmt.Errorf("grafana user is required for person notification")
+		}
+		if name == "" {
+			name = firstNonEmpty(userName, userLogin)
+		}
+	}
+	if targetType == "group" && name == "" {
+		return NotificationChannel{}, fmt.Errorf("name is required for group notification")
+	}
+
+	severities := normalizeSeverities(input.Severities)
+	if len(severities) == 0 {
+		severities = []string{"critical"}
+	}
+
+	now := time.Now().UTC()
+	return NotificationChannel{
+		ID:            fmt.Sprintf("notification-%d", now.UnixNano()),
+		Kind:          kind,
+		TargetType:    targetType,
+		Name:          name,
+		GrafanaUserID: input.GrafanaUserID,
+		UserLogin:     userLogin,
+		UserName:      userName,
+		ChatID:        chatID,
+		Severities:    severities,
+		Enabled:       input.Enabled,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}, nil
+}
+
+func normalizeSeverities(values []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		result = append(result, normalized)
+	}
+	return result
+}
+
+func splitCSV(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return normalizeSeverities(strings.Split(value, ","))
+}
+
+func channelMatchesAlertUser(channel NotificationChannel, alert Alert) bool {
+	if channel.GrafanaUserID != 0 && alert.AssignedUserID != 0 && channel.GrafanaUserID == alert.AssignedUserID {
+		return true
+	}
+	return channel.UserLogin != "" && alert.AssignedUserLogin != "" && strings.EqualFold(channel.UserLogin, alert.AssignedUserLogin)
+}
+
+func dedupeNotificationChannels(channels []NotificationChannel) []NotificationChannel {
+	seen := map[string]bool{}
+	result := make([]NotificationChannel, 0, len(channels))
+	for _, channel := range channels {
+		key := channel.Kind + ":" + channel.ChatID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, channel)
+	}
+	return result
+}
+
+func sortNotificationChannels(channels []NotificationChannel) {
+	sort.Slice(channels, func(i, j int) bool {
+		return channels[i].CreatedAt.After(channels[j].CreatedAt)
+	})
 }
 
 func sortShifts(shifts []Shift) {

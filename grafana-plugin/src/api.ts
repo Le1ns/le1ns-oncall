@@ -98,6 +98,33 @@ export interface PersonReport {
   jiraIssuesCreated: number;
 }
 
+export interface NotificationChannel {
+  id: string;
+  kind: string;
+  targetType: 'person' | 'group';
+  name: string;
+  grafanaUserId: number;
+  userLogin: string;
+  userName: string;
+  chatId: string;
+  severities: string[];
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateNotificationChannelInput {
+  kind: string;
+  targetType: 'person' | 'group';
+  name: string;
+  grafanaUserId: number;
+  userLogin: string;
+  userName: string;
+  chatId: string;
+  severities: string[];
+  enabled: boolean;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -128,6 +155,16 @@ export const onCallApi = {
     }),
   users: () => request<{ users: GrafanaUser[]; source: string; note?: string }>('/api/v1/grafana/users'),
   alerts: () => request<{ alerts: AlertmanagerAlert[] }>('/api/v1/alerts'),
+  notificationChannels: () => request<{ channels: NotificationChannel[] }>('/api/v1/notification-channels'),
+  createNotificationChannel: (input: CreateNotificationChannelInput) =>
+    request<NotificationChannel>('/api/v1/notification-channels', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  deleteNotificationChannel: (id: string) =>
+    request<{ status: string }>(`/api/v1/notification-channels/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
   dailyReport: () => request<DailyReport>('/api/v1/reports/daily'),
   periodReport: (from: string, to: string) => request<PeriodReport>(withPeriod('/api/v1/reports/period', from, to)),
 };

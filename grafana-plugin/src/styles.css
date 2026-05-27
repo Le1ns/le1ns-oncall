@@ -27,7 +27,8 @@
 }
 
 .oncall-calendar-page,
-.oncall-reports-page {
+.oncall-reports-page,
+.oncall-settings-page {
   display: grid;
   gap: 14px;
 }
@@ -220,7 +221,7 @@
   align-items: end;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(190px, 1.4fr) repeat(5, minmax(110px, 1fr)) auto;
+  grid-template-columns: minmax(190px, 1.35fr) minmax(150px, 1.2fr) repeat(5, minmax(110px, 1fr)) auto;
   padding: 12px;
 }
 
@@ -242,6 +243,11 @@
   padding: 0 9px;
 }
 
+.oncall-form-panel > button {
+  justify-self: end;
+  white-space: nowrap;
+}
+
 .oncall-legend {
   align-items: center;
   display: flex;
@@ -250,6 +256,61 @@
 
 .oncall-report-config {
   grid-template-columns: minmax(230px, 1fr) minmax(150px, 180px) minmax(150px, 180px) auto;
+}
+
+.oncall-settings-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+}
+
+.oncall-notification-form {
+  grid-template-columns:
+    minmax(210px, 1.2fr)
+    minmax(120px, 0.7fr)
+    minmax(120px, 0.7fr)
+    minmax(160px, 1fr)
+    minmax(140px, 0.9fr)
+    minmax(210px, 1.2fr)
+    auto;
+}
+
+.oncall-severity-field {
+  border: 0;
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.oncall-severity-field legend {
+  color: rgb(204, 204, 220);
+  font-size: 12px;
+  margin-bottom: 6px;
+  padding: 0;
+}
+
+.oncall-severity-field > div,
+.oncall-badge-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.oncall-severity-field label {
+  align-items: center;
+  color: rgb(204, 204, 220);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 5px;
+}
+
+.oncall-severity-field input {
+  height: 14px;
+  margin: 0;
+  width: 14px;
 }
 
 .oncall-report-summary {
@@ -332,7 +393,9 @@
 
   .oncall-form-panel,
   .oncall-report-config,
-  .oncall-report-summary {
+  .oncall-report-summary,
+  .oncall-settings-grid,
+  .oncall-notification-form {
     grid-template-columns: 1fr;
   }
 
