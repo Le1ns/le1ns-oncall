@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/rest/api/3/user/search"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": [
+      {
+        "accountId": "mock-account-1",
+        "emailAddress": "admin@localhost",
+        "displayName": "Grafana Admin"
+      }
+    ]
+  }
+}

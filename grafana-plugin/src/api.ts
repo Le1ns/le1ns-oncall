@@ -1,3 +1,5 @@
+import { getBackendSrv } from '@grafana/runtime';
+
 const API_BASE = 'http://localhost:8080';
 
 export interface HealthResponse {
@@ -86,6 +88,24 @@ export interface AlertmanagerAlert {
   assignedUserName: string;
   createdAt: string;
   updatedAt: string;
+  jiraIssueKey?: string;
+  jiraIssueUrl?: string;
+}
+export interface JiraSettings {
+  enabled: boolean;
+  baseUrl: string;
+  projectKey: string;
+  issueType: string;
+  autoCreateOnFiring: boolean;
+  summaryTemplate: string;
+  descriptionTemplate: string;
+  labels: string[];
+  updatedAt: string;
+}
+export interface CurrentGrafanaUser {
+  login: string;
+  email: string;
+  isGrafanaAdmin: boolean;
 }
 
 export interface PersonReport {
@@ -101,6 +121,8 @@ export interface PersonReport {
 export interface NotificationChannel {
   id: string;
   kind: string;
+  receiverId: string;
+  receiverName: string;
   targetType: 'person' | 'group';
   name: string;
   grafanaUserId: number;
@@ -114,7 +136,8 @@ export interface NotificationChannel {
 }
 
 export interface CreateNotificationChannelInput {
-  kind: string;
+  kind?: string;
+  receiverId: string;
   targetType: 'person' | 'group';
   name: string;
   grafanaUserId: number;
@@ -122,6 +145,24 @@ export interface CreateNotificationChannelInput {
   userName: string;
   chatId: string;
   severities: string[];
+  enabled: boolean;
+}
+
+export interface NotificationReceiver {
+  id: string;
+  kind: 'telegram' | 'lark';
+  name: string;
+  hasSecret: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateNotificationReceiverInput {
+  kind: 'telegram' | 'lark';
+  name: string;
+  botToken: string;
+  webhookUrl: string;
   enabled: boolean;
 }
 
@@ -154,7 +195,31 @@ export const onCallApi = {
       body: JSON.stringify(input),
     }),
   users: () => request<{ users: GrafanaUser[]; source: string; note?: string }>('/api/v1/grafana/users'),
-  alerts: () => request<{ alerts: AlertmanagerAlert[] }>('/api/v1/alerts'),
+  alerts: (from: string, to: string, limit = 200) =>
+    request<{ range: { from: string; to: string }; alerts: AlertmanagerAlert[] }>(
+      withPeriod(`/api/v1/alerts?limit=${encodeURIComponent(String(limit))}`, from, to)
+    ),
+  createAlertJiraIssue: (alertId: string) =>
+    request<{ issue: { issueKey: string; issueUrl: string }; existing: boolean }>(
+      `/api/v1/alerts/${encodeURIComponent(alertId)}/jira-issue`,
+      { method: 'POST' }
+    ),
+  jiraSettings: () => request<JiraSettings>('/api/v1/integrations/jira/settings'),
+  updateJiraSettings: (input: JiraSettings) =>
+    request<JiraSettings>('/api/v1/integrations/jira/settings', {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+  notificationReceivers: () => request<{ receivers: NotificationReceiver[] }>('/api/v1/notification-receivers'),
+  createNotificationReceiver: (input: CreateNotificationReceiverInput) =>
+    request<NotificationReceiver>('/api/v1/notification-receivers', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  deleteNotificationReceiver: (id: string) =>
+    request<{ status: string }>(`/api/v1/notification-receivers/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
   notificationChannels: () => request<{ channels: NotificationChannel[] }>('/api/v1/notification-channels'),
   createNotificationChannel: (input: CreateNotificationChannelInput) =>
     request<NotificationChannel>('/api/v1/notification-channels', {
@@ -167,10 +232,19 @@ export const onCallApi = {
     }),
   dailyReport: () => request<DailyReport>('/api/v1/reports/daily'),
   periodReport: (from: string, to: string) => request<PeriodReport>(withPeriod('/api/v1/reports/period', from, to)),
+  currentGrafanaUser: async () => {
+    const user = await getBackendSrv().get('/api/user');
+    return {
+      login: user.login ?? '',
+      email: user.email ?? '',
+      isGrafanaAdmin: Boolean(user.isGrafanaAdmin),
+    } as CurrentGrafanaUser;
+  },
 };
 
 function withPeriod(path: string, from?: string, to?: string) {
-  const query = new URLSearchParams();
+  const [base, existing] = path.split('?', 2);
+  const query = new URLSearchParams(existing ?? '');
   if (from) {
     query.set('from', from);
   }
@@ -178,5 +252,5 @@ function withPeriod(path: string, from?: string, to?: string) {
     query.set('to', to);
   }
   const suffix = query.toString();
-  return suffix ? `${path}?${suffix}` : path;
+  return suffix ? `${base}?${suffix}` : base;
 }

@@ -58,6 +58,41 @@ type Alert struct {
 	Payload           json.RawMessage `json:"payload,omitempty"`
 	CreatedAt         time.Time       `json:"createdAt"`
 	UpdatedAt         time.Time       `json:"updatedAt"`
+	JiraIssueKey      string          `json:"jiraIssueKey,omitempty"`
+	JiraIssueURL      string          `json:"jiraIssueUrl,omitempty"`
+}
+
+type JiraSettings struct {
+	Enabled             bool      `json:"enabled"`
+	BaseURL             string    `json:"baseUrl"`
+	ProjectKey          string    `json:"projectKey"`
+	IssueType           string    `json:"issueType"`
+	AutoCreateOnFiring  bool      `json:"autoCreateOnFiring"`
+	SummaryTemplate     string    `json:"summaryTemplate"`
+	DescriptionTemplate string    `json:"descriptionTemplate"`
+	Labels              []string  `json:"labels"`
+	UpdatedAt           time.Time `json:"updatedAt"`
+}
+
+type UpdateJiraSettings struct {
+	Enabled             bool     `json:"enabled"`
+	BaseURL             string   `json:"baseUrl"`
+	ProjectKey          string   `json:"projectKey"`
+	IssueType           string   `json:"issueType"`
+	AutoCreateOnFiring  bool     `json:"autoCreateOnFiring"`
+	SummaryTemplate     string   `json:"summaryTemplate"`
+	DescriptionTemplate string   `json:"descriptionTemplate"`
+	Labels              []string `json:"labels"`
+}
+
+type JiraIssue struct {
+	ID            string    `json:"id"`
+	AlertID       string    `json:"alertId"`
+	Fingerprint   string    `json:"fingerprint"`
+	IssueKey      string    `json:"issueKey"`
+	IssueURL      string    `json:"issueUrl"`
+	CreatedByRule string    `json:"createdByRule"`
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 type CreateShift struct {
@@ -70,9 +105,31 @@ type CreateShift struct {
 	Layer      int       `json:"layer"`
 }
 
+type NotificationReceiver struct {
+	ID         string    `json:"id"`
+	Kind       string    `json:"kind"`
+	Name       string    `json:"name"`
+	BotToken   string    `json:"botToken,omitempty"`
+	WebhookURL string    `json:"webhookUrl,omitempty"`
+	HasSecret  bool      `json:"hasSecret"`
+	Enabled    bool      `json:"enabled"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+type CreateNotificationReceiver struct {
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	BotToken   string `json:"botToken"`
+	WebhookURL string `json:"webhookUrl"`
+	Enabled    bool   `json:"enabled"`
+}
+
 type NotificationChannel struct {
 	ID            string    `json:"id"`
 	Kind          string    `json:"kind"`
+	ReceiverID    string    `json:"receiverId"`
+	ReceiverName  string    `json:"receiverName"`
 	TargetType    string    `json:"targetType"`
 	Name          string    `json:"name"`
 	GrafanaUserID int64     `json:"grafanaUserId"`
@@ -87,6 +144,7 @@ type NotificationChannel struct {
 
 type CreateNotificationChannel struct {
 	Kind          string   `json:"kind"`
+	ReceiverID    string   `json:"receiverId"`
 	TargetType    string   `json:"targetType"`
 	Name          string   `json:"name"`
 	GrafanaUserID int64    `json:"grafanaUserId"`
@@ -95,6 +153,11 @@ type CreateNotificationChannel struct {
 	ChatID        string   `json:"chatId"`
 	Severities    []string `json:"severities"`
 	Enabled       bool     `json:"enabled"`
+}
+
+type NotificationRoute struct {
+	Channel  NotificationChannel
+	Receiver NotificationReceiver
 }
 
 type PeriodReport struct {
@@ -149,7 +212,10 @@ type Store struct {
 	schedules     []Schedule
 	shifts        []Shift
 	alerts        []Alert
+	receivers     []NotificationReceiver
 	notifications []NotificationChannel
+	jiraSettings  JiraSettings
+	jiraIssues    []JiraIssue
 	intakeWindows map[string]alertIntakeWindow
 }
 
@@ -213,7 +279,70 @@ func newMemoryStore() *Store {
 				Layer:        0,
 			},
 		},
+		jiraSettings: JiraSettings{
+			Enabled:             false,
+			BaseURL:             "",
+			ProjectKey:          "OPS",
+			IssueType:           "Task",
+			AutoCreateOnFiring:  true,
+			SummaryTemplate:     "[{{severity}}] {{alertName}}",
+			DescriptionTemplate: "{{summary}}",
+			Labels:              []string{"oncall"},
+		},
 	}
+}
+
+func (s *Store) NotificationReceivers() []NotificationReceiver {
+	if s.db != nil {
+		return s.pgNotificationReceivers()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := make([]NotificationReceiver, 0, len(s.receivers))
+	for _, receiver := range s.receivers {
+		result = append(result, receiver.public())
+	}
+	sortNotificationReceivers(result)
+	return result
+}
+
+func (s *Store) CreateNotificationReceiver(input CreateNotificationReceiver) (NotificationReceiver, error) {
+	receiver, err := normalizeNotificationReceiver(input)
+	if err != nil {
+		return NotificationReceiver{}, err
+	}
+	if s.db != nil {
+		return s.pgCreateNotificationReceiver(receiver)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.receivers = append(s.receivers, receiver)
+	return receiver.public(), nil
+}
+
+func (s *Store) DeleteNotificationReceiver(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("notification receiver id is required")
+	}
+	if s.db != nil {
+		return s.pgDeleteNotificationReceiver(id)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.receivers {
+		if s.receivers[index].ID == id {
+			s.receivers = append(s.receivers[:index], s.receivers[index+1:]...)
+			s.notifications = deleteChannelsByReceiver(s.notifications, id)
+			return nil
+		}
+	}
+	return fmt.Errorf("notification receiver not found")
 }
 
 func (s *Store) NotificationChannels() []NotificationChannel {
@@ -231,7 +360,7 @@ func (s *Store) NotificationChannels() []NotificationChannel {
 }
 
 func (s *Store) CreateNotificationChannel(input CreateNotificationChannel) (NotificationChannel, error) {
-	channel, err := normalizeNotificationChannel(input)
+	channel, err := s.normalizeNotificationChannel(input)
 	if err != nil {
 		return NotificationChannel{}, err
 	}
@@ -247,7 +376,7 @@ func (s *Store) CreateNotificationChannel(input CreateNotificationChannel) (Noti
 }
 
 func (s *Store) UpdateNotificationChannel(id string, input CreateNotificationChannel) (NotificationChannel, error) {
-	channel, err := normalizeNotificationChannel(input)
+	channel, err := s.normalizeNotificationChannel(input)
 	if err != nil {
 		return NotificationChannel{}, err
 	}
@@ -293,24 +422,34 @@ func (s *Store) DeleteNotificationChannel(id string) error {
 }
 
 func (s *Store) AlertNotificationChannels(alert Alert) []NotificationChannel {
+	routes := s.AlertNotificationRoutes(alert)
+	channels := make([]NotificationChannel, 0, len(routes))
+	for _, route := range routes {
+		channels = append(channels, route.Channel)
+	}
+	return channels
+}
+
+func (s *Store) AlertNotificationRoutes(alert Alert) []NotificationRoute {
 	channels := s.NotificationChannels()
-	result := make([]NotificationChannel, 0, len(channels))
+	result := make([]NotificationRoute, 0, len(channels))
 	for _, channel := range channels {
-		if !channel.Enabled || channel.Kind != "telegram" || channel.ChatID == "" {
+		receiver, ok := s.notificationReceiverForChannel(channel)
+		if !ok || !channel.Enabled || !receiver.Enabled {
 			continue
 		}
 		if !severityAllowed(alert.Severity, severitySet(channel.Severities)) {
 			continue
 		}
 		if channel.TargetType == "group" {
-			result = append(result, channel)
+			result = append(result, NotificationRoute{Channel: channel, Receiver: receiver})
 			continue
 		}
 		if channel.TargetType == "person" && channelMatchesAlertUser(channel, alert) {
-			result = append(result, channel)
+			result = append(result, NotificationRoute{Channel: channel, Receiver: receiver})
 		}
 	}
-	return dedupeNotificationChannels(result)
+	return dedupeNotificationRoutes(result)
 }
 
 func (s *Store) Schedules() []Schedule {
@@ -390,6 +529,112 @@ func (s *Store) Alerts(limit int) []Alert {
 	})
 	if len(result) > limit {
 		return result[:limit]
+	}
+	return result
+}
+
+func (s *Store) AlertsByPeriod(from, to time.Time, limit int) []Alert {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	if s.db != nil {
+		return s.pgAlertsByPeriod(from, to, limit)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]Alert, 0, len(s.alerts))
+	for _, alert := range s.alerts {
+		t := alert.CreatedAt
+		if alert.StartsAt != nil {
+			t = *alert.StartsAt
+		}
+		if !t.Before(from) && t.Before(to) {
+			result = append(result, alert)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+	if len(result) > limit {
+		return result[:limit]
+	}
+	return result
+}
+
+func (s *Store) JiraSettings() JiraSettings {
+	if s.db != nil {
+		return s.pgJiraSettings()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneJiraSettings(s.jiraSettings)
+}
+
+func (s *Store) UpdateJiraSettings(input UpdateJiraSettings) (JiraSettings, error) {
+	settings, err := normalizeJiraSettings(input)
+	if err != nil {
+		return JiraSettings{}, err
+	}
+	if s.db != nil {
+		return s.pgUpsertJiraSettings(settings)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	settings.UpdatedAt = time.Now().UTC()
+	s.jiraSettings = settings
+	return cloneJiraSettings(settings), nil
+}
+
+func (s *Store) JiraIssueByFingerprint(fingerprint string) (JiraIssue, bool) {
+	fingerprint = strings.TrimSpace(fingerprint)
+	if fingerprint == "" {
+		return JiraIssue{}, false
+	}
+	if s.db != nil {
+		return s.pgJiraIssueByFingerprint(fingerprint)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, issue := range s.jiraIssues {
+		if issue.Fingerprint == fingerprint {
+			return issue, true
+		}
+	}
+	return JiraIssue{}, false
+}
+
+func (s *Store) CreateJiraIssue(issue JiraIssue) (JiraIssue, error) {
+	if s.db != nil {
+		return s.pgCreateJiraIssue(issue)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, current := range s.jiraIssues {
+		if current.Fingerprint == issue.Fingerprint {
+			return JiraIssue{}, fmt.Errorf("jira issue for this alert already exists")
+		}
+	}
+	if issue.ID == "" {
+		issue.ID = fmt.Sprintf("jira-%d", time.Now().UnixNano())
+	}
+	if issue.CreatedAt.IsZero() {
+		issue.CreatedAt = time.Now().UTC()
+	}
+	s.jiraIssues = append(s.jiraIssues, issue)
+	return issue, nil
+}
+
+func (s *Store) JiraIssues(from, to time.Time) []JiraIssue {
+	if s.db != nil {
+		return s.pgJiraIssues(from, to)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]JiraIssue, 0, len(s.jiraIssues))
+	for _, issue := range s.jiraIssues {
+		if !issue.CreatedAt.Before(from) && issue.CreatedAt.Before(to) {
+			result = append(result, issue)
+		}
 	}
 	return result
 }
@@ -500,6 +745,26 @@ func (s *Store) Report(from, to time.Time) PeriodReport {
 		}
 		person.Alerts++
 	}
+	for _, issue := range s.JiraIssues(from, to) {
+		totals.JiraIssuesCreated++
+		if issue.AlertID == "" {
+			continue
+		}
+		alert, ok := findAlertByID(alerts, issue.AlertID)
+		if !ok || alert.AssignedUserID == 0 {
+			continue
+		}
+		person, ok := people[alert.AssignedUserID]
+		if !ok {
+			person = &PersonReport{
+				UserID:    alert.AssignedUserID,
+				UserLogin: alert.AssignedUserLogin,
+				UserName:  alert.AssignedUserName,
+			}
+			people[alert.AssignedUserID] = person
+		}
+		person.JiraIssuesCreated++
+	}
 
 	result := make([]PersonReport, 0, len(people))
 	for _, person := range people {
@@ -574,9 +839,48 @@ CREATE TABLE IF NOT EXISTS oncall_alerts (
 CREATE INDEX IF NOT EXISTS oncall_alerts_created_at_idx ON oncall_alerts(created_at DESC);
 CREATE INDEX IF NOT EXISTS oncall_alerts_status_idx ON oncall_alerts(status);
 
+CREATE TABLE IF NOT EXISTS oncall_jira_settings (
+  id BOOLEAN PRIMARY KEY DEFAULT true,
+  enabled BOOLEAN NOT NULL DEFAULT false,
+  base_url TEXT NOT NULL DEFAULT '',
+  project_key TEXT NOT NULL DEFAULT 'OPS',
+  issue_type TEXT NOT NULL DEFAULT 'Task',
+  auto_create_on_firing BOOLEAN NOT NULL DEFAULT true,
+  summary_template TEXT NOT NULL DEFAULT '[{{severity}}] {{alertName}}',
+  description_template TEXT NOT NULL DEFAULT '{{summary}}',
+  labels TEXT NOT NULL DEFAULT 'oncall',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS oncall_jira_issues (
+  id TEXT PRIMARY KEY,
+  alert_id TEXT NOT NULL DEFAULT '',
+  fingerprint TEXT NOT NULL UNIQUE,
+  issue_key TEXT NOT NULL UNIQUE,
+  issue_url TEXT NOT NULL,
+  created_by_rule TEXT NOT NULL DEFAULT 'manual',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS oncall_jira_issues_created_at_idx ON oncall_jira_issues(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS oncall_notification_receivers (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  bot_token TEXT NOT NULL DEFAULT '',
+  webhook_url TEXT NOT NULL DEFAULT '',
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS oncall_notification_receivers_kind_idx ON oncall_notification_receivers(kind);
+
 CREATE TABLE IF NOT EXISTS oncall_notification_channels (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
+  receiver_id TEXT NOT NULL DEFAULT '',
   target_type TEXT NOT NULL,
   name TEXT NOT NULL,
   grafana_user_id BIGINT NOT NULL DEFAULT 0,
@@ -590,6 +894,9 @@ CREATE TABLE IF NOT EXISTS oncall_notification_channels (
 );
 
 CREATE INDEX IF NOT EXISTS oncall_notification_channels_kind_idx ON oncall_notification_channels(kind, target_type);
+
+ALTER TABLE oncall_notification_channels ADD COLUMN IF NOT EXISTS receiver_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE oncall_notification_channels ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'telegram';
 `)
 	return err
 }
@@ -618,6 +925,15 @@ ON CONFLICT (id) DO NOTHING
 INSERT INTO oncall_shifts (id, schedule_id, grafana_user_id, user_login, user_name, starts_at, ends_at, layer)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `, shift.ID, shift.ScheduleID, shift.UserID, shift.UserLogin, shift.UserName, shift.StartsAt, shift.EndsAt, shift.Layer)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(ctx, `
+INSERT INTO oncall_jira_settings (id, enabled, base_url, project_key, issue_type, auto_create_on_firing, summary_template, description_template, labels)
+VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (id) DO NOTHING
+`, s.jiraSettings.Enabled, s.jiraSettings.BaseURL, s.jiraSettings.ProjectKey, s.jiraSettings.IssueType, s.jiraSettings.AutoCreateOnFiring, s.jiraSettings.SummaryTemplate, s.jiraSettings.DescriptionTemplate, strings.Join(s.jiraSettings.Labels, ","))
 	return err
 }
 
@@ -730,24 +1046,27 @@ func (s *Store) pgAlerts(limit int) []Alert {
 
 	rows, err := s.db.Query(ctx, `
 SELECT
-  id,
-  fingerprint,
-  group_key,
-  status,
-  severity,
-  alert_name,
-  service,
-  summary,
-  starts_at,
-  ends_at,
-  assigned_grafana_user_id,
-  assigned_user_login,
-  assigned_user_name,
-  payload,
-  created_at,
-  updated_at
-FROM oncall_alerts
-ORDER BY created_at DESC
+  a.id,
+  a.fingerprint,
+  a.group_key,
+  a.status,
+  a.severity,
+  a.alert_name,
+  a.service,
+  a.summary,
+  a.starts_at,
+  a.ends_at,
+  a.assigned_grafana_user_id,
+  a.assigned_user_login,
+  a.assigned_user_name,
+  a.payload,
+  a.created_at,
+  a.updated_at,
+  COALESCE(j.issue_key, ''),
+  COALESCE(j.issue_url, '')
+FROM oncall_alerts a
+LEFT JOIN oncall_jira_issues j ON j.fingerprint = a.fingerprint
+ORDER BY a.created_at DESC
 LIMIT $1
 `, limit)
 	if err != nil {
@@ -775,6 +1094,8 @@ LIMIT $1
 			&alert.Payload,
 			&alert.CreatedAt,
 			&alert.UpdatedAt,
+			&alert.JiraIssueKey,
+			&alert.JiraIssueURL,
 		); err != nil {
 			return nil
 		}
@@ -783,14 +1104,286 @@ LIMIT $1
 	return alerts
 }
 
+func (s *Store) pgAlertsByPeriod(from, to time.Time, limit int) []Alert {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.db.Query(ctx, `
+SELECT
+  a.id,
+  a.fingerprint,
+  a.group_key,
+  a.status,
+  a.severity,
+  a.alert_name,
+  a.service,
+  a.summary,
+  a.starts_at,
+  a.ends_at,
+  a.assigned_grafana_user_id,
+  a.assigned_user_login,
+  a.assigned_user_name,
+  a.payload,
+  a.created_at,
+  a.updated_at,
+  COALESCE(j.issue_key, ''),
+  COALESCE(j.issue_url, '')
+FROM oncall_alerts a
+LEFT JOIN oncall_jira_issues j ON j.fingerprint = a.fingerprint
+WHERE COALESCE(a.starts_at, a.created_at) >= $1
+  AND COALESCE(a.starts_at, a.created_at) < $2
+ORDER BY a.created_at DESC
+LIMIT $3
+`, from, to, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	alerts := []Alert{}
+	for rows.Next() {
+		var alert Alert
+		if err := rows.Scan(
+			&alert.ID,
+			&alert.Fingerprint,
+			&alert.GroupKey,
+			&alert.Status,
+			&alert.Severity,
+			&alert.AlertName,
+			&alert.Service,
+			&alert.Summary,
+			&alert.StartsAt,
+			&alert.EndsAt,
+			&alert.AssignedUserID,
+			&alert.AssignedUserLogin,
+			&alert.AssignedUserName,
+			&alert.Payload,
+			&alert.CreatedAt,
+			&alert.UpdatedAt,
+			&alert.JiraIssueKey,
+			&alert.JiraIssueURL,
+		); err != nil {
+			return nil
+		}
+		alerts = append(alerts, alert)
+	}
+	return alerts
+}
+
+func (s *Store) pgJiraSettings() JiraSettings {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var settings JiraSettings
+	var labels string
+	err := s.db.QueryRow(ctx, `
+SELECT enabled, base_url, project_key, issue_type, auto_create_on_firing, summary_template, description_template, labels, updated_at
+FROM oncall_jira_settings
+WHERE id = true
+`).Scan(&settings.Enabled, &settings.BaseURL, &settings.ProjectKey, &settings.IssueType, &settings.AutoCreateOnFiring, &settings.SummaryTemplate, &settings.DescriptionTemplate, &labels, &settings.UpdatedAt)
+	if err != nil {
+		return cloneJiraSettings(s.jiraSettings)
+	}
+	settings.Labels = splitCSV(labels)
+	return settings
+}
+
+func (s *Store) pgUpsertJiraSettings(settings JiraSettings) (JiraSettings, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	settings.UpdatedAt = time.Now().UTC()
+	_, err := s.db.Exec(ctx, `
+INSERT INTO oncall_jira_settings (id, enabled, base_url, project_key, issue_type, auto_create_on_firing, summary_template, description_template, labels, updated_at)
+VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (id) DO UPDATE SET
+  enabled = EXCLUDED.enabled,
+  base_url = EXCLUDED.base_url,
+  project_key = EXCLUDED.project_key,
+  issue_type = EXCLUDED.issue_type,
+  auto_create_on_firing = EXCLUDED.auto_create_on_firing,
+  summary_template = EXCLUDED.summary_template,
+  description_template = EXCLUDED.description_template,
+  labels = EXCLUDED.labels,
+  updated_at = EXCLUDED.updated_at
+`, settings.Enabled, settings.BaseURL, settings.ProjectKey, settings.IssueType, settings.AutoCreateOnFiring, settings.SummaryTemplate, settings.DescriptionTemplate, strings.Join(settings.Labels, ","), settings.UpdatedAt)
+	if err != nil {
+		return JiraSettings{}, err
+	}
+	return settings, nil
+}
+
+func (s *Store) pgJiraIssueByFingerprint(fingerprint string) (JiraIssue, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var issue JiraIssue
+	err := s.db.QueryRow(ctx, `
+SELECT id, alert_id, fingerprint, issue_key, issue_url, created_by_rule, created_at
+FROM oncall_jira_issues
+WHERE fingerprint = $1
+`, fingerprint).Scan(&issue.ID, &issue.AlertID, &issue.Fingerprint, &issue.IssueKey, &issue.IssueURL, &issue.CreatedByRule, &issue.CreatedAt)
+	if err != nil {
+		return JiraIssue{}, false
+	}
+	return issue, true
+}
+
+func (s *Store) pgCreateJiraIssue(issue JiraIssue) (JiraIssue, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if issue.ID == "" {
+		issue.ID = fmt.Sprintf("jira-%d", time.Now().UnixNano())
+	}
+	if issue.CreatedAt.IsZero() {
+		issue.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.Exec(ctx, `
+INSERT INTO oncall_jira_issues (id, alert_id, fingerprint, issue_key, issue_url, created_by_rule, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+`, issue.ID, issue.AlertID, issue.Fingerprint, issue.IssueKey, issue.IssueURL, issue.CreatedByRule, issue.CreatedAt)
+	if err != nil {
+		return JiraIssue{}, err
+	}
+	return issue, nil
+}
+
+func (s *Store) pgJiraIssues(from, to time.Time) []JiraIssue {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.db.Query(ctx, `
+SELECT id, alert_id, fingerprint, issue_key, issue_url, created_by_rule, created_at
+FROM oncall_jira_issues
+WHERE created_at >= $1 AND created_at < $2
+ORDER BY created_at DESC
+`, from, to)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	result := []JiraIssue{}
+	for rows.Next() {
+		var issue JiraIssue
+		if err := rows.Scan(&issue.ID, &issue.AlertID, &issue.Fingerprint, &issue.IssueKey, &issue.IssueURL, &issue.CreatedByRule, &issue.CreatedAt); err != nil {
+			return nil
+		}
+		result = append(result, issue)
+	}
+	return result
+}
+
+func (s *Store) pgNotificationReceivers() []NotificationReceiver {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.db.Query(ctx, `
+SELECT id, kind, name, bot_token <> '' OR webhook_url <> '' AS has_secret, enabled, created_at, updated_at
+FROM oncall_notification_receivers
+ORDER BY created_at DESC
+`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	receivers := []NotificationReceiver{}
+	for rows.Next() {
+		var receiver NotificationReceiver
+		if err := rows.Scan(
+			&receiver.ID,
+			&receiver.Kind,
+			&receiver.Name,
+			&receiver.HasSecret,
+			&receiver.Enabled,
+			&receiver.CreatedAt,
+			&receiver.UpdatedAt,
+		); err != nil {
+			return nil
+		}
+		receivers = append(receivers, receiver)
+	}
+	return receivers
+}
+
+func (s *Store) pgCreateNotificationReceiver(receiver NotificationReceiver) (NotificationReceiver, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := s.db.Exec(ctx, `
+INSERT INTO oncall_notification_receivers (
+  id, kind, name, bot_token, webhook_url, enabled, created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+`, receiver.ID, receiver.Kind, receiver.Name, receiver.BotToken, receiver.WebhookURL, receiver.Enabled, receiver.CreatedAt, receiver.UpdatedAt)
+	if err != nil {
+		return NotificationReceiver{}, err
+	}
+	return receiver.public(), nil
+}
+
+func (s *Store) pgDeleteNotificationReceiver(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := s.db.Exec(ctx, `DELETE FROM oncall_notification_channels WHERE receiver_id = $1`, id); err != nil {
+		return err
+	}
+	tag, err := s.db.Exec(ctx, `DELETE FROM oncall_notification_receivers WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("notification receiver not found")
+	}
+	return nil
+}
+
+func (s *Store) pgNotificationReceiver(id string) (NotificationReceiver, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var receiver NotificationReceiver
+	err := s.db.QueryRow(ctx, `
+SELECT id, kind, name, bot_token, webhook_url, enabled, created_at, updated_at
+FROM oncall_notification_receivers
+WHERE id = $1
+`, id).Scan(
+		&receiver.ID,
+		&receiver.Kind,
+		&receiver.Name,
+		&receiver.BotToken,
+		&receiver.WebhookURL,
+		&receiver.Enabled,
+		&receiver.CreatedAt,
+		&receiver.UpdatedAt,
+	)
+	if err != nil {
+		return NotificationReceiver{}, false
+	}
+	receiver.HasSecret = receiver.BotToken != "" || receiver.WebhookURL != ""
+	return receiver, true
+}
+
 func (s *Store) pgNotificationChannels() []NotificationChannel {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	rows, err := s.db.Query(ctx, `
-SELECT id, kind, target_type, name, grafana_user_id, user_login, user_name, chat_id, severities, enabled, created_at, updated_at
-FROM oncall_notification_channels
-ORDER BY created_at DESC
+SELECT
+  ch.id,
+  COALESCE(NULLIF(rc.kind, ''), ch.kind) AS kind,
+  ch.receiver_id,
+  COALESCE(rc.name, '') AS receiver_name,
+  ch.target_type,
+  ch.name,
+  ch.grafana_user_id,
+  ch.user_login,
+  ch.user_name,
+  ch.chat_id,
+  ch.severities,
+  ch.enabled,
+  ch.created_at,
+  ch.updated_at
+FROM oncall_notification_channels ch
+LEFT JOIN oncall_notification_receivers rc ON rc.id = ch.receiver_id
+ORDER BY ch.created_at DESC
 `)
 	if err != nil {
 		return nil
@@ -804,6 +1397,8 @@ ORDER BY created_at DESC
 		if err := rows.Scan(
 			&channel.ID,
 			&channel.Kind,
+			&channel.ReceiverID,
+			&channel.ReceiverName,
 			&channel.TargetType,
 			&channel.Name,
 			&channel.GrafanaUserID,
@@ -829,10 +1424,10 @@ func (s *Store) pgCreateNotificationChannel(channel NotificationChannel) (Notifi
 
 	_, err := s.db.Exec(ctx, `
 INSERT INTO oncall_notification_channels (
-  id, kind, target_type, name, grafana_user_id, user_login, user_name, chat_id, severities, enabled, created_at, updated_at
+  id, kind, receiver_id, target_type, name, grafana_user_id, user_login, user_name, chat_id, severities, enabled, created_at, updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-`, channel.ID, channel.Kind, channel.TargetType, channel.Name, channel.GrafanaUserID, channel.UserLogin, channel.UserName, channel.ChatID, strings.Join(channel.Severities, ","), channel.Enabled, channel.CreatedAt, channel.UpdatedAt)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+`, channel.ID, channel.Kind, channel.ReceiverID, channel.TargetType, channel.Name, channel.GrafanaUserID, channel.UserLogin, channel.UserName, channel.ChatID, strings.Join(channel.Severities, ","), channel.Enabled, channel.CreatedAt, channel.UpdatedAt)
 	if err != nil {
 		return NotificationChannel{}, err
 	}
@@ -847,18 +1442,19 @@ func (s *Store) pgUpdateNotificationChannel(channel NotificationChannel) (Notifi
 	err := s.db.QueryRow(ctx, `
 UPDATE oncall_notification_channels
 SET kind = $2,
-    target_type = $3,
-    name = $4,
-    grafana_user_id = $5,
-    user_login = $6,
-    user_name = $7,
-    chat_id = $8,
-    severities = $9,
-    enabled = $10,
-    updated_at = $11
+    receiver_id = $3,
+    target_type = $4,
+    name = $5,
+    grafana_user_id = $6,
+    user_login = $7,
+    user_name = $8,
+    chat_id = $9,
+    severities = $10,
+    enabled = $11,
+    updated_at = $12
 WHERE id = $1
 RETURNING created_at
-`, channel.ID, channel.Kind, channel.TargetType, channel.Name, channel.GrafanaUserID, channel.UserLogin, channel.UserName, channel.ChatID, strings.Join(channel.Severities, ","), channel.Enabled, channel.UpdatedAt).Scan(&createdAt)
+`, channel.ID, channel.Kind, channel.ReceiverID, channel.TargetType, channel.Name, channel.GrafanaUserID, channel.UserLogin, channel.UserName, channel.ChatID, strings.Join(channel.Severities, ","), channel.Enabled, channel.UpdatedAt).Scan(&createdAt)
 	if err != nil {
 		return NotificationChannel{}, err
 	}
@@ -1088,6 +1684,41 @@ func parseOptionalTime(value any) *time.Time {
 	return &parsed
 }
 
+func normalizeJiraSettings(input UpdateJiraSettings) (JiraSettings, error) {
+	projectKey := strings.ToUpper(strings.TrimSpace(input.ProjectKey))
+	if projectKey == "" {
+		return JiraSettings{}, fmt.Errorf("projectKey is required")
+	}
+	issueType := strings.TrimSpace(input.IssueType)
+	if issueType == "" {
+		issueType = "Task"
+	}
+	summaryTemplate := strings.TrimSpace(input.SummaryTemplate)
+	if summaryTemplate == "" {
+		summaryTemplate = "[{{severity}}] {{alertName}}"
+	}
+	descriptionTemplate := strings.TrimSpace(input.DescriptionTemplate)
+	if descriptionTemplate == "" {
+		descriptionTemplate = "{{summary}}"
+	}
+	return JiraSettings{
+		Enabled:             input.Enabled,
+		BaseURL:             strings.TrimSpace(input.BaseURL),
+		ProjectKey:          projectKey,
+		IssueType:           issueType,
+		AutoCreateOnFiring:  input.AutoCreateOnFiring,
+		SummaryTemplate:     summaryTemplate,
+		DescriptionTemplate: descriptionTemplate,
+		Labels:              normalizeSeverities(input.Labels),
+	}, nil
+}
+
+func cloneJiraSettings(settings JiraSettings) JiraSettings {
+	out := settings
+	out.Labels = append([]string{}, settings.Labels...)
+	return out
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -1097,22 +1728,75 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func normalizeNotificationChannel(input CreateNotificationChannel) (NotificationChannel, error) {
+func findAlertByID(alerts []Alert, id string) (Alert, bool) {
+	for _, alert := range alerts {
+		if alert.ID == id {
+			return alert, true
+		}
+	}
+	return Alert{}, false
+}
+
+func normalizeNotificationReceiver(input CreateNotificationReceiver) (NotificationReceiver, error) {
 	kind := strings.ToLower(strings.TrimSpace(input.Kind))
-	targetType := strings.ToLower(strings.TrimSpace(input.TargetType))
+	name := strings.TrimSpace(input.Name)
+	botToken := strings.TrimSpace(input.BotToken)
+	webhookURL := strings.TrimSpace(input.WebhookURL)
 	if kind == "" {
 		kind = "telegram"
 	}
 	if kind != "telegram" && kind != "lark" {
-		return NotificationChannel{}, fmt.Errorf("notification kind must be telegram or lark")
+		return NotificationReceiver{}, fmt.Errorf("receiver kind must be telegram or lark")
 	}
+	if name == "" {
+		return NotificationReceiver{}, fmt.Errorf("receiver name is required")
+	}
+	if kind == "telegram" && botToken == "" {
+		return NotificationReceiver{}, fmt.Errorf("telegram bot token is required")
+	}
+	if kind == "lark" && webhookURL == "" {
+		return NotificationReceiver{}, fmt.Errorf("lark webhook url is required")
+	}
+
+	now := time.Now().UTC()
+	return NotificationReceiver{
+		ID:         fmt.Sprintf("receiver-%d", now.UnixNano()),
+		Kind:       kind,
+		Name:       name,
+		BotToken:   botToken,
+		WebhookURL: webhookURL,
+		HasSecret:  botToken != "" || webhookURL != "",
+		Enabled:    input.Enabled,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}, nil
+}
+
+func (s *Store) normalizeNotificationChannel(input CreateNotificationChannel) (NotificationChannel, error) {
+	receiverID := strings.TrimSpace(input.ReceiverID)
+	if receiverID == "" {
+		return NotificationChannel{}, fmt.Errorf("receiverId is required")
+	}
+	receiver, ok := s.notificationReceiverByID(receiverID)
+	if !ok {
+		return NotificationChannel{}, fmt.Errorf("notification receiver not found")
+	}
+
+	kind := receiver.Kind
+	targetType := strings.ToLower(strings.TrimSpace(input.TargetType))
 	if targetType != "person" && targetType != "group" {
 		return NotificationChannel{}, fmt.Errorf("targetType must be person or group")
 	}
+	if kind == "lark" && targetType != "group" {
+		return NotificationChannel{}, fmt.Errorf("lark notifications support group targets only")
+	}
 
 	chatID := strings.TrimSpace(input.ChatID)
-	if chatID == "" {
+	if kind == "telegram" && chatID == "" {
 		return NotificationChannel{}, fmt.Errorf("chatId is required")
+	}
+	if kind == "lark" {
+		chatID = ""
 	}
 
 	name := strings.TrimSpace(input.Name)
@@ -1139,6 +1823,8 @@ func normalizeNotificationChannel(input CreateNotificationChannel) (Notification
 	return NotificationChannel{
 		ID:            fmt.Sprintf("notification-%d", now.UnixNano()),
 		Kind:          kind,
+		ReceiverID:    receiver.ID,
+		ReceiverName:  receiver.Name,
 		TargetType:    targetType,
 		Name:          name,
 		GrafanaUserID: input.GrafanaUserID,
@@ -1150,6 +1836,36 @@ func normalizeNotificationChannel(input CreateNotificationChannel) (Notification
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}, nil
+}
+
+func (s *Store) notificationReceiverByID(id string) (NotificationReceiver, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return NotificationReceiver{}, false
+	}
+	if s.db != nil {
+		return s.pgNotificationReceiver(id)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, receiver := range s.receivers {
+		if receiver.ID == id {
+			return receiver, true
+		}
+	}
+	return NotificationReceiver{}, false
+}
+
+func (s *Store) notificationReceiverForChannel(channel NotificationChannel) (NotificationReceiver, bool) {
+	return s.notificationReceiverByID(channel.ReceiverID)
+}
+
+func (r NotificationReceiver) public() NotificationReceiver {
+	r.HasSecret = r.BotToken != "" || r.WebhookURL != ""
+	r.BotToken = ""
+	r.WebhookURL = ""
+	return r
 }
 
 func normalizeSeverities(values []string) []string {
@@ -1180,18 +1896,34 @@ func channelMatchesAlertUser(channel NotificationChannel, alert Alert) bool {
 	return channel.UserLogin != "" && alert.AssignedUserLogin != "" && strings.EqualFold(channel.UserLogin, alert.AssignedUserLogin)
 }
 
-func dedupeNotificationChannels(channels []NotificationChannel) []NotificationChannel {
+func dedupeNotificationRoutes(routes []NotificationRoute) []NotificationRoute {
 	seen := map[string]bool{}
-	result := make([]NotificationChannel, 0, len(channels))
-	for _, channel := range channels {
-		key := channel.Kind + ":" + channel.ChatID
+	result := make([]NotificationRoute, 0, len(routes))
+	for _, route := range routes {
+		key := route.Receiver.ID + ":" + route.Channel.ChatID + ":" + route.Channel.TargetType + ":" + route.Channel.Name
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		result = append(result, channel)
+		result = append(result, route)
 	}
 	return result
+}
+
+func deleteChannelsByReceiver(channels []NotificationChannel, receiverID string) []NotificationChannel {
+	result := channels[:0]
+	for _, channel := range channels {
+		if channel.ReceiverID != receiverID {
+			result = append(result, channel)
+		}
+	}
+	return result
+}
+
+func sortNotificationReceivers(receivers []NotificationReceiver) {
+	sort.Slice(receivers, func(i, j int) bool {
+		return receivers[i].CreatedAt.After(receivers[j].CreatedAt)
+	})
 }
 
 func sortNotificationChannels(channels []NotificationChannel) {

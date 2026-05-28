@@ -38,7 +38,7 @@ func Load() Config {
 		GrafanaURL:          env("ONCALL_GRAFANA_URL", "http://localhost:3000"),
 		GrafanaServiceToken: os.Getenv("ONCALL_GRAFANA_SERVICE_TOKEN"),
 		GrafanaBasicAuth:    os.Getenv("ONCALL_GRAFANA_BASIC_AUTH"),
-		AlertmanagerToken:   env("ONCALL_ALERTMANAGER_TOKEN", "dev-alertmanager-token"),
+		AlertmanagerToken:   os.Getenv("ONCALL_ALERTMANAGER_TOKEN"),
 		AlertSeverities:     listEnv("ONCALL_ALERTMANAGER_ALLOWED_SEVERITIES", []string{"*"}),
 		AlertMaxPerGroup:    intEnv("ONCALL_ALERTMANAGER_MAX_ALERTS_PER_GROUP", 20),
 		AlertRateWindow:     durationEnv("ONCALL_ALERTMANAGER_RATE_WINDOW", 10*time.Minute),

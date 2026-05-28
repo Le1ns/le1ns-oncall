@@ -1,4 +1,27 @@
 services:
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./dev/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+
+  jira-mock:
+    image: wiremock/wiremock:3.9.1
+    command: ["--port", "8081", "--global-response-templating"]
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./dev/jira-mock/mappings:/home/wiremock/mappings:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8081/__admin/mappings >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -26,14 +49,13 @@ services:
       ONCALL_GRAFANA_URL: http://grafana:3000
       ONCALL_GRAFANA_SERVICE_TOKEN: ${ONCALL_GRAFANA_SERVICE_TOKEN:-}
       ONCALL_GRAFANA_BASIC_AUTH: ${ONCALL_GRAFANA_BASIC_AUTH:-admin:admin}
-      ONCALL_ALERTMANAGER_TOKEN: ${ONCALL_ALERTMANAGER_TOKEN:-dev-alertmanager-token}
       ONCALL_ALERTMANAGER_ALLOWED_SEVERITIES: ${ONCALL_ALERTMANAGER_ALLOWED_SEVERITIES:-*}
       ONCALL_ALERTMANAGER_MAX_ALERTS_PER_GROUP: ${ONCALL_ALERTMANAGER_MAX_ALERTS_PER_GROUP:-20}
       ONCALL_ALERTMANAGER_RATE_WINDOW: ${ONCALL_ALERTMANAGER_RATE_WINDOW:-10m}
       ONCALL_ALERTMANAGER_MAX_ALERTS_PER_WEBHOOK: ${ONCALL_ALERTMANAGER_MAX_ALERTS_PER_WEBHOOK:-100}
       ONCALL_JIRA_BASE_URL: ${ONCALL_JIRA_BASE_URL:-}
-      ONCALL_JIRA_EMAIL: ${ONCALL_JIRA_EMAIL:-}
-      ONCALL_JIRA_API_TOKEN: ${ONCALL_JIRA_API_TOKEN:-}
+      ONCALL_JIRA_EMAIL: ${ONCALL_JIRA_EMAIL:-oncall-admin@example.com}
+      ONCALL_JIRA_API_TOKEN: ${ONCALL_JIRA_API_TOKEN:-dev-jira-token}
       ONCALL_JIRA_PROJECT_KEY: ${ONCALL_JIRA_PROJECT_KEY:-OPS}
       ONCALL_JIRA_ISSUE_TYPE: ${ONCALL_JIRA_ISSUE_TYPE:-Task}
       ONCALL_TELEGRAM_BOT_TOKEN: ${ONCALL_TELEGRAM_BOT_TOKEN:-}
@@ -45,6 +67,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      jira-mock:
+        condition: service_started
+      alertmanager:
+        condition: service_started
 
   grafana-plugin-build:
     image: node:22-alpine

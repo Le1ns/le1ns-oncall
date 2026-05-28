@@ -61,19 +61,44 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE TABLE IF NOT EXISTS jira_issues (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   alert_id UUID REFERENCES alerts(id) ON DELETE SET NULL,
+  fingerprint TEXT NOT NULL UNIQUE,
   issue_key TEXT NOT NULL UNIQUE,
   issue_url TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT '',
+  created_by_rule TEXT NOT NULL DEFAULT 'manual',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS jira_settings (
+  id BOOLEAN PRIMARY KEY DEFAULT true,
+  enabled BOOLEAN NOT NULL DEFAULT false,
+  base_url TEXT NOT NULL DEFAULT '',
+  project_key TEXT NOT NULL DEFAULT 'OPS',
+  issue_type TEXT NOT NULL DEFAULT 'Task',
+  auto_create_on_firing BOOLEAN NOT NULL DEFAULT true,
+  summary_template TEXT NOT NULL DEFAULT '[{{severity}}] {{alertName}}',
+  description_template TEXT NOT NULL DEFAULT '{{summary}}',
+  labels TEXT NOT NULL DEFAULT 'oncall',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS notification_receivers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  bot_token TEXT NOT NULL DEFAULT '',
+  webhook_url TEXT NOT NULL DEFAULT '',
+  enabled BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS notification_channels (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  receiver_id UUID REFERENCES notification_receivers(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
   target_type TEXT NOT NULL DEFAULT 'group',
   name TEXT NOT NULL,
-  target TEXT NOT NULL,
+  target TEXT NOT NULL DEFAULT '',
   grafana_user_id BIGINT,
   user_login TEXT NOT NULL DEFAULT '',
   user_name TEXT NOT NULL DEFAULT '',

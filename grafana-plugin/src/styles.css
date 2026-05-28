@@ -40,7 +40,7 @@
 .oncall-table-panel {
   background: rgb(24, 27, 31);
   border: 1px solid rgba(204, 204, 220, 0.12);
-  border-radius: 4px;
+  border-radius: 10px;
 }
 
 .oncall-toolbar {
@@ -233,14 +233,97 @@
 }
 
 .oncall-form-panel input,
-.oncall-form-panel select {
+.oncall-form-panel select,
+.oncall-form-panel textarea {
   background: rgb(11, 13, 16);
   border: 1px solid rgba(204, 204, 220, 0.24);
-  border-radius: 4px;
+  border-radius: 10px;
   color: rgb(240, 240, 245);
   font-size: 13px;
   height: 32px;
-  padding: 0 9px;
+  padding: 0 11px;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
+}
+
+.oncall-form-panel textarea {
+  min-height: 52px;
+  padding: 8px 11px;
+  resize: vertical;
+}
+
+.oncall-form-panel input:focus,
+.oncall-form-panel select:focus,
+.oncall-form-panel textarea:focus {
+  border-color: rgba(112, 168, 255, 0.7);
+  box-shadow: 0 0 0 3px rgba(86, 144, 255, 0.18);
+  outline: none;
+}
+
+.oncall-toggle-row {
+  align-items: center;
+  align-self: stretch;
+  display: flex !important;
+  gap: 10px;
+  min-height: 32px;
+  padding-top: 18px;
+}
+
+.oncall-toggle-row input {
+  height: 16px;
+  margin: 0;
+  width: 16px;
+}
+
+.oncall-toggle-row span {
+  color: rgb(224, 229, 236);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.oncall-collapse {
+  border: 1px solid rgba(204, 204, 220, 0.12);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.oncall-collapse > summary {
+  align-items: center;
+  background: rgb(20, 23, 28);
+  color: rgb(229, 233, 241);
+  cursor: pointer;
+  display: flex;
+  font-size: 13px;
+  font-weight: 600;
+  list-style: none;
+  min-height: 44px;
+  padding: 0 14px;
+  text-transform: uppercase;
+}
+
+.oncall-collapse > summary::-webkit-details-marker {
+  display: none;
+}
+
+.oncall-collapse > summary::before {
+  content: "›";
+  font-size: 18px;
+  margin-right: 8px;
+  transform: rotate(90deg);
+  transition: transform 0.15s ease;
+}
+
+.oncall-collapse:not([open]) > summary::before {
+  transform: rotate(0deg);
+}
+
+.oncall-collapse > .oncall-form-panel,
+.oncall-collapse > .oncall-table-panel {
+  border: 0;
+  border-radius: 0;
+}
+
+.oncall-collapse-block + .oncall-collapse-block {
+  border-top: 1px solid rgba(204, 204, 220, 0.12);
 }
 
 .oncall-form-panel > button {
@@ -258,6 +341,10 @@
   grid-template-columns: minmax(230px, 1fr) minmax(150px, 180px) minmax(150px, 180px) auto;
 }
 
+.oncall-receiver-form {
+  grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(170px, 1fr) minmax(200px, 1.1fr) auto;
+}
+
 .oncall-settings-grid {
   display: grid;
   gap: 12px;
@@ -266,12 +353,12 @@
 
 .oncall-notification-form {
   grid-template-columns:
-    minmax(210px, 1.2fr)
-    minmax(120px, 0.7fr)
-    minmax(120px, 0.7fr)
-    minmax(160px, 1fr)
-    minmax(140px, 0.9fr)
-    minmax(210px, 1.2fr)
+    minmax(170px, 1fr)
+    minmax(100px, 0.65fr)
+    minmax(110px, 0.7fr)
+    minmax(130px, 0.8fr)
+    minmax(120px, 0.8fr)
+    minmax(170px, 1fr)
     auto;
 }
 
@@ -393,6 +480,7 @@
 
   .oncall-form-panel,
   .oncall-report-config,
+  .oncall-receiver-form,
   .oncall-report-summary,
   .oncall-settings-grid,
   .oncall-notification-form {

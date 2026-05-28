@@ -1,0 +1,17 @@
+{
+  "request": {
+    "method": "POST",
+    "urlPath": "/rest/api/3/issue"
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "id": "10001",
+      "key": "OPS-1001",
+      "self": "http://jira-mock:8081/rest/api/3/issue/10001"
+    }
+  }
+}
